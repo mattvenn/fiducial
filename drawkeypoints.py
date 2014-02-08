@@ -9,4 +9,5 @@ kp = sift.detect(gray,None)
 
 img=cv2.drawKeypoints(gray,kp)
 
-cv2.imwrite('sift_keypoints.jpg',img)
+cv2.imshow('show',img)
+cv2.waitKey()
