@@ -1,3 +1,6 @@
+"""
+uses multiple images of the chessboard to calibrate camera
+"""
 import numpy as np
 import cv2
 import glob
@@ -16,9 +19,7 @@ objp[:,:2] = np.mgrid[0:chess_c*square_size:square_size,0:chess_r*square_size:sq
 objpoints = [] # 3d point in real world space
 imgpoints = [] # 2d points in image plane.
 
-images = glob.glob('left*.jpg')
-#images = ['left01.jpg']
-
+images = glob.glob('./canon_training/*.jpg')
 for fname in images:
     print(fname)
     img = cv2.imread(fname)
@@ -38,7 +39,7 @@ for fname in images:
         print("found corners",len(corners))
         cv2.drawChessboardCorners(img, (chess_c,chess_r), corners,ret)
         cv2.imshow('img',img)
-        cv2.waitKey()
+        cv2.waitKey(100)
 
 #get calibration of camera
 ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1],None,None)

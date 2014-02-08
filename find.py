@@ -1,64 +1,138 @@
 import numpy as np
 import cv2
-from matplotlib import pyplot as plt
 
-MIN_MATCH_COUNT = 10
+MIN_MATCH_COUNT = 80
+SHADOW_V = 120 #the (hs)v threshold for up or down.
 
-tag1 = cv2.imread('artag1.jpg',0)          # queryImage
-tag2 = cv2.imread('artag2.jpg',0)          # queryImage
-img2 = cv2.imread('artag_rotate.jpg',0) # trainImage
+#load fiducial
+tag = cv2.imread('artags/60mmpair.jpg',0)
+real_width = 95.0 #mm
+# h and w of fiducial
+h,w = tag.shape
 
-# Initiate SIFT detector
-sift = cv2.SIFT()
+#braille pin spacing and positioning wrt top left corner of fiducial
+x_pitch = 2.5
+y_pitch = 2.5
+pin_x = 50.6
+pin_y = 14.8
+shadow_size = 10
 
-# find the keypoints and descriptors with SIFT
-tag1_kp1, tag1_des1 = sift.detectAndCompute(tag1,None)
-tag2_kp1, tag2_des1 = sift.detectAndCompute(tag2,None)
+#useful function
+def mm2px(mm):
+    return mm * (w/real_width)
 
-kp2, des2 = sift.detectAndCompute(img2,None)
+#load in one of our distorted images
+img = cv2.imread('photo.jpg') # trainImage
 
+# Load previously saved data about the camera - generated with the chessboard photos
+calib = np.load('B.npz')
+mtx = calib['mtx']
+dist = calib['dist']
 
-def find(tag1_des1,tag1_kp1):
-    FLANN_INDEX_KDTREE = 0
-    index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
-    search_params = dict(checks = 50)
+#undistort the image!
+ph, pw = img.shape[:2]
+newcameramtx, roi=cv2.getOptimalNewCameraMatrix(mtx,dist,(pw,ph),1,(pw,ph))
+img = cv2.undistort(img, mtx, dist, None, newcameramtx)
 
-    flann = cv2.FlannBasedMatcher(index_params, search_params)
-    matches = flann.knnMatch(tag1_des1,des2,k=2)
+# Initiate ORB detector
+orb = cv2.ORB()
 
-    # store all the good matches as per Lowe's ratio test.
-    good = []
-    for m,n in matches:
-        if m.distance < 0.7*n.distance:
-            good.append(m)
+#find the keypoints and descriptors with ORB
+#fiducial
+tag_kp = orb.detect(tag,None)
+tag_kp, tag_des = orb.compute(tag,tag_kp)
+#photo
+img_kp = orb.detect(img,None)
+img_kp, img_des = orb.compute(img,img_kp)
 
+#does the match, if it's good returns the homography transform
+def find(des,kp):
+    # create BFMatcher object
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-    if len(good)>MIN_MATCH_COUNT:
-        src_pts = np.float32([ tag1_kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
-        dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
+    # Match descriptors.
+    matches = bf.match(des,img_des)
 
+    # Sort them in the order of their distance.
+    matches = sorted(matches, key = lambda x:x.distance)
+
+    print "matches are found - %d/%d" % (len(matches),MIN_MATCH_COUNT)
+    
+    if len(matches)>MIN_MATCH_COUNT:
+        src_pts = np.float32([ kp[m.queryIdx].pt for m in matches[:MIN_MATCH_COUNT] ]).reshape(-1,1,2)
+        dst_pts = np.float32([ img_kp[m.trainIdx].pt for m in matches[:MIN_MATCH_COUNT] ]).reshape(-1,1,2)
+
+        #get the transformation between the flat fiducial and the found fiducial in the photo
         M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
-        matchesMask = mask.ravel().tolist()
 
-        h,w = tag1.shape
-        pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
-        dst = cv2.perspectiveTransform(pts,M)
-
-        print(dst)
-        cv2.polylines(img2,[np.int32(dst)],True,(0,0,0),3, cv2.CV_AA)
-        cv2.circle(img2,(100,200),3,(255,0,0),-1)
-
-        M = cv2.moments(dst)
-        centroid_x = int(M['m10']/M['m00'])
-        centroid_y = int(M['m01']/M['m00'])
-        return(centroid_x,centroid_y)
-
+        #return the transform
+        return M
     else:
-        print "Not enough matches are found - %d/%d" % (len(good),MIN_MATCH_COUNT)
-        matchesMask = None
+        print "Not enough matches are found - %d/%d" % (len(matches),MIN_MATCH_COUNT)
 
-pt1=find(tag1_des1,tag1_kp1)
-pt2=find(tag2_des1,tag2_kp1)
-cv2.line(img2,pt1,pt2,(0,0,0),3)
-cv2.imshow('found',img2)
+#draws a box round the fiducial
+def draw_outline(M):
+    #array containing co-ords of the fiducial
+    pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
+    #transform the coords of the fiducial onto the picture
+    dst = cv2.perspectiveTransform(pts,M)
+    #draw a box around the fiducial
+    cv2.polylines(img,[np.int32(dst)],True,(255,0,0),5, cv2.CV_AA)
+
+#find the shadows of the pins!
+def detect_shadows(M):
+    pin_num = 0
+    #for each shadow: pins are numbered 0 to 2 in the left column, 3 to 5 in the right
+    for x in range(2):
+        for y in range(3):
+
+            pin_pt=np.float32([
+                [mm2px(pin_x+x*x_pitch),mm2px(pin_y+y*y_pitch)],
+                ]).reshape(-1,1,2)
+            #transform the pin coords
+            pin_dst = cv2.perspectiveTransform(pin_pt,M)
+
+            #the pin x and y in the image
+            pin_x_dst = pin_dst[0][0][0]
+            pin_y_dst = pin_dst[0][0][1]
+            print pin_x_dst , pin_y_dst
+
+            #define a ROI for the shadow - cv2 only does square
+            roi = img[pin_y_dst:pin_y_dst+shadow_size,pin_x_dst:pin_x_dst+shadow_size]
+
+            #save it for reference
+            cv2.imwrite('roi' + str(pin_num) + '.png', roi)
+
+            #convert to HSV
+            hsvroi = cv2.cvtColor(roi,cv2.COLOR_BGR2HSV)
+
+            #mean value
+            val = cv2.mean(hsvroi)[2]
+
+            #is it up or down?
+            print("pin %d v%0.2f = %s" % (pin_num, val, "down" if val > SHADOW_V else "up"))
+            pin_num += 1
+
+    #cv2.circle(img,(int(pin_x_dst),int(pin_y_dst)),10,(255,0,0),-1)
+    #put a box round the pins
+    #roidst = cv2.perspectiveTransform(roipts,M)
+    #cv2.polylines(img,[np.int32(roidst)],True,(255,0,0),3, cv2.CV_AA)
+    #cv2.line(img,tuple(roidst[0][0]),tuple(roidst[1][0]),(255,0,0),3)
+
+
+#find the fiducial
+print( "find fiducial")
+M = find(tag_des,tag_kp)
+draw_outline(M)
+detect_shadows(M)
+
+#write out full size image
+cv2.imwrite('found.png', img)
+
+#resize for display
+newx,newy = img.shape[1]/4,img.shape[0]/4 #new size (w,h)
+img = cv2.resize(img,(newx,newy))
+
+#show the image
+cv2.imshow('found',img)
 cv2.waitKey()
